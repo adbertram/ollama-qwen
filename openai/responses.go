@@ -802,7 +802,9 @@ func FromResponsesRequest(r ResponsesRequest, thinking ...*model.Thinking) (*api
 	var tools []api.Tool
 	hasWebSearch := HasWebSearchTool(r.Tools)
 	hasToolSearch := HasToolSearchTool(r.Tools)
-	for _, t := range r.Tools {
+	seenTools := make(map[string]bool)
+	// Client search results become callable tools on subsequent turns.
+	for toolIndex, t := range availableTools {
 		if isWebSearchTool(t) {
 			tools = append(tools, WebSearchFunctionTool())
 			continue
@@ -823,12 +825,19 @@ func FromResponsesRequest(r ResponsesRequest, thinking ...*model.Thinking) (*api
 			return nil, err
 		}
 		for _, tool := range expanded {
+			if toolIndex >= len(r.Tools) && tool.Type != "function" {
+				return nil, fmt.Errorf("unsupported discovered Responses tool type %q", tool.Type)
+			}
 			// The built-in tool owns this name. Keeping a user-declared function
 			// with the same name makes a model call ambiguous.
 			if (hasWebSearch && tool.Function.Name == "web_search") ||
 				(hasToolSearch && tool.Function.Name == "tool_search") {
 				continue
 			}
+			if seenTools[tool.Function.Name] {
+				continue
+			}
+			seenTools[tool.Function.Name] = true
 			tools = append(tools, tool)
 		}
 	}

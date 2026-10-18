@@ -739,8 +739,8 @@ func TestFromResponsesRequest_ToolSearchOutputBecomesToolContent(t *testing.T) {
 	if len(content) != 1 || content[0]["name"] != "lookup_order" || content[0]["x_client_field"] != "preserved" {
 		t.Fatalf("content = %#v", content)
 	}
-	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "tool_search" {
-		t.Fatalf("native tools = %#v; discovered tool must remain content-only", chat.Tools)
+	if len(chat.Tools) != 2 || chat.Tools[0].Function.Name != "tool_search" || chat.Tools[1].Function.Name != "lookup_order" {
+		t.Fatalf("native tools = %#v; discovered tool must be callable", chat.Tools)
 	}
 }
 
@@ -828,8 +828,14 @@ func TestFromResponsesRequest_ToolSearchOutputFlattensNamespaceMembers(t *testin
 	if got := string(request.Input.Items[1].(ResponsesToolSearchOutput).Tools[0]); got != string(namespace) {
 		t.Fatalf("Responses tool_search_output was mutated: %s", got)
 	}
-	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "tool_search" {
-		t.Fatalf("native tools = %#v; discovered tools must remain content-only", chat.Tools)
+	wantNames := []string{"tool_search", "mcp__openaiDeveloperDocs.search_openai_docs", "mcp__codex_apps__github_search", "plain"}
+	if len(chat.Tools) != len(wantNames) {
+		t.Fatalf("native tools = %#v; discovered tools must be callable", chat.Tools)
+	}
+	for i, name := range wantNames {
+		if chat.Tools[i].Function.Name != name {
+			t.Fatalf("native tool %d = %q, want %q", i, chat.Tools[i].Function.Name, name)
+		}
 	}
 }
 
@@ -3188,5 +3194,44 @@ func TestFromResponsesRequestAcceptsEncryptedContentPart(t *testing.T) {
 	}
 	if len(chat.Messages) != 1 || chat.Messages[0].Content != "prefix opaque to us" {
 		t.Fatalf("messages = %#v", chat.Messages)
+	}
+}
+
+func TestFromResponsesRequestDiscoveredToolsRemainCallableWithoutDuplicates(t *testing.T) {
+	member := json.RawMessage(`{"type":"namespace","name":"multi_agent_v1","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}}]}`)
+	request := ResponsesRequest{
+		Tools: []ResponsesTool{{Type: "tool_search", Execution: "client"}},
+		Input: ResponsesInput{Items: []ResponsesInputItem{
+			ResponsesToolSearchOutput{Type: "tool_search_output", CallID: "first", Tools: []json.RawMessage{member}},
+			ResponsesToolSearchOutput{Type: "tool_search_output", CallID: "second", Tools: []json.RawMessage{member}},
+		}},
+	}
+	chat, err := FromResponsesRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Tools) != 2 {
+		t.Fatalf("tools = %#v, want search plus one discovered spawn", chat.Tools)
+	}
+	spawn := chat.Tools[1].Function
+	if spawn.Name != "multi_agent_v1.spawn_agent" {
+		t.Fatalf("name = %q", spawn.Name)
+	}
+	if len(spawn.Parameters.Required) != 1 || spawn.Parameters.Required[0] != "message" {
+		t.Fatalf("parameters = %#v", spawn.Parameters)
+	}
+}
+
+func TestFromResponsesRequestRejectsUnsupportedDiscoveredTool(t *testing.T) {
+	for _, raw := range []string{
+		`{"type":"unknown","name":"bad"}`,
+		`{"type":"namespace","name":"multi_agent_v1","tools":[{"type":"unknown","name":"bad"}]}`,
+	} {
+		_, err := FromResponsesRequest(ResponsesRequest{Input: ResponsesInput{Items: []ResponsesInputItem{
+			ResponsesToolSearchOutput{Type: "tool_search_output", Tools: []json.RawMessage{json.RawMessage(raw)}},
+		}}})
+		if err == nil {
+			t.Fatal("expected unsupported discovered tool to fail")
+		}
 	}
 }
